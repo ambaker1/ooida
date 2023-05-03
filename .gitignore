@@ -1,0 +1,11 @@
+working/**
+build/**
+doc/**
+tests/IDA
+!doc/*.tex
+!doc/*.pdf
+!doc/template/
+!doc/template/*.tex
+!doc/references/
+!doc/references/*.bib
+!doc/references/*.tex

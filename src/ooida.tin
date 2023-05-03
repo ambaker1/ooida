@@ -1,0 +1,1185 @@
+# ooida.tcl
+################################################################################
+# Object oriented IDA framework for OpenSees.
+# Based on the parallel hunt-fill algorithm by Vamvatsikos and Cornell 2011
+
+# Copyright (C) 2023 Alex Baker, ambaker1@mtu.edu
+# All rights reserved. 
+
+# See the file "LICENSE" in the top level directory for information on usage, 
+# redistribution, and for a DISCLAIMER OF ALL WARRANTIES.
+################################################################################
+
+# External package dependencies
+package require tda::ndlist 0.1
+package require tda::tbl 0.1
+package require mpjobs 0.1
+
+# Define namespace
+namespace eval ::ooida {
+    namespace export ida suite
+}
+
+# General IDA procedures
+################################################################################
+
+# GenerateQueue --
+#
+# Get priority list of intensity measures to run (by bisection and trisection)
+#
+# Syntax:
+# GenerateQueue $ims $epsilon
+#
+# Arguments:
+# ims           List of intensity measures, in increasing order
+# epsilon       Maximum gap size
+
+proc ::ooida::GenerateQueue {ims epsilon} {
+    # Initialize gapMap and call recursive function.
+    set gapMap ""
+    GetGaps $ims $epsilon
+    # Return the ims of "map", in order of decreasing gap size
+    return [dict keys [lsort -stride 2 -index 1 -real -decreasing $gapMap]]
+}
+
+# GetGaps --
+# 
+# Recursive function called within GenerateQueue to get a list of gaps 
+# for the purpose of refining the IDA curve.
+# Bisects and calls itself if the gap between consecutive intensities is too 
+# large to meet the precision by trisection or bisection.
+# "gapMap" is a dictionary of intensities and the gaps they split up.
+#
+# Syntax:
+# GetGaps $ims $epsilon
+#
+# Arguments:
+# ims           List of intensity measures, in increasing order
+# epsilon       Maximum gap size
+
+proc ::ooida::GetGaps {ims epsilon} {
+    upvar gapMap gapMap
+    foreach im2 [lassign $ims im1] {
+        set gap [expr {$im2 - $im1}]
+        if {$gap > 3*$epsilon} {
+            # Bisect and recurse
+            set mid [expr {$im1 + $gap/2.0}]
+            dict set gapMap $mid $gap
+            GetGaps [list $im1 $mid $im2] $epsilon
+        } elseif {$gap > 2*$epsilon} {
+            # Trisect to meet precision
+            dict set gapMap [expr {$im1 + $gap/3.0}] $gap
+            dict set gapMap [expr {$im1 + $gap*(2.0/3.0)}] $gap
+        } elseif {$gap > $epsilon} {
+            # Bisect to meet precision
+            dict set gapMap [expr {$im1 + $gap/2.0}] $gap
+        }
+        set im1 $im2
+    }
+    return
+}
+
+# IDA class definition
+################################################################################
+
+oo::class create ::ooida::ida {
+    # Class variables
+    variable settings; # Settings dictionary
+    variable lowerLimit upperLimit; # Intensity thresholds for partial IDA
+    variable huntPrecision fillPrecision; # Intensity precisions
+    variable huntType huntStart huntStep; # Hunt-up settings
+    variable fillQueue; # Ordered list of intensities for efficient fill-in
+    variable imList; # Ordered list of all saved intensities
+    variable idaData; # Dictionary of IDA data (im first level, dm second)
+    # im:
+    #   jobTag:     Job tag
+    #   results:    Results from job or just direct results.
+    variable im2job; # Mapping of intensity measure to job tags for active jobs
+    variable dmData; # Dict of intensities and damage measure data
+    variable stage; # IDA stage integer (0-4)
+    variable capacity; # Largest non-collapsing intensity below minCollapse
+    variable minCollapse; # Minimum collapse (if collapse was reached)
+    variable collapsed; # Whether collapse was reached
+    variable collapseData; # Dict of collapse names and collapse IMs
+    variable collapseCriteria; # Dictionary of collapse names and criteria
+
+    # ida new/create --
+    #
+    # Create an IDA object
+    # 
+    # Syntax:
+    # ida new <$option $value ...>
+    # ida create $name <$option $value ...>
+    # 
+    # Arguments:
+    # name          Name of IDA object.
+    # option        Settings option (see "my ApplySettings")
+    # value         Value for settings option (see "my ApplySettings")
+    
+    constructor {args} {
+        # Define default settings
+        set settings [dict create {*}{
+            -huntup {Geometric 1.0 2.0}
+            -limits {0 Inf}
+        }]
+        # Ensure that required options were inputted
+        if {![dict exists $args -collapse]} {
+            return -code error "Must provide collapse criteria"
+        }
+        if {![dict exists $args -precision]} {
+            return -code error "Must provide intensity measure precision"
+        }
+        
+        # Apply IDA settings
+        my ApplySettings {*}$args
+        
+        # Initialize IDA
+        my wipe
+        return
+    }
+
+    # $ida copy --
+    #
+    # Shorthand for copying IDA object, calls oo::copy
+    #
+    # Syntax:
+    # $ida copy <$targetObject> <$targetNamespace>
+    # 
+    # Arguments:
+    # targetObject          See oo::copy documentation
+    # targetNamespace       See oo::copy documentation
+    
+    method copy {args} {
+        uplevel 1 [list oo::copy [self] {*}$args]
+    }
+    
+    # $ida wipe --
+    #
+    # Clear all IDA data
+    #
+    # Syntax:
+    # $ida wipe
+    
+    method wipe {} {
+        set im2job ""; # Dictionary of ims and active job names 
+        set idaData ""; # Dictionary of ims and results/jobTags
+        my Refresh; # Redefines collapse and stage from idaData
+    }
+    
+    # $ida update --
+    #
+    # Updates active IDA jobs from job board framework
+    #
+    # Syntax:
+    # $ida update
+    
+    method update {} {     
+        # Guard clause for no jobs
+        if {[dict size $im2job] == 0} {
+            return
+        }
+        # Add results for any completed jobs
+        ::mpjobs::updateJobs [dict values $im2job]
+        dict for {im jobTag} $im2job {
+            set status [::mpjobs::getJobStatus $jobTag]
+            if {$status == 0} {
+                # This should not occur.
+                return -code error "job $jobTag is posted but not running"
+            } elseif {$status == 1} {
+                # Job is still active
+                continue
+            } elseif {$status == 2} {
+                # Job is complete
+                my add $im {*}[::mpjobs::getJobResults $jobTag]
+            } else {
+                # Job resulted in error
+                return -code error "Error in job $jobTag"
+            }; # end switch job status
+        }; # end dict for jobname and im
+        return
+    }
+    
+    # $ida configure --
+    #
+    # Queries or updates configuration settings.
+    # If no arguments, returns entire settings dictionary.
+    # If one argument, returns the settings for that option.
+    # If an even number of arguments, defines the settings.
+    # See "my ApplySettings" for option syntax.
+    #
+    # Syntax:
+    # $ida configure
+    # $ida configure $option
+    # $ida configure $option $value ...
+    # 
+    # Arguments:
+    # option        Settings option (see "my ApplySettings")
+    # value         Value for settings option (see "my ApplySettings")
+    
+    method configure {args} {
+        # Switch for arity (based on how fconfigure works with Tcl)
+        if {[llength $args] == 0} {
+            # Query all settings
+            return $settings
+        } elseif {[llength $args] == 1} {
+            # Query specific setting
+            set setting [lindex $args 0]
+            if {![dict exists $settings $setting]} {
+                return -code error "Unknown setting \"$setting\""
+            }
+            return [dict get $settings $setting]
+        }
+        
+        # Apply the settings
+        my ApplySettings {*}$args
+        
+        # Make required changes for certain settings changes
+        if {[dict exists $args -collapse]} {
+            my Refresh
+        } elseif {[dict exists $args -limits] || 
+            [dict exists $args -precision]
+        } then {
+            set stage 0
+            my UpdateStage
+        }
+        return
+    }
+    
+    # $ida add --
+    #
+    # Adds a single point to the IDA, whether it is a tentative or final.
+    #
+    # Syntax:
+    # $ida add $im <$jobTag> <$dmName $dmValue ...>
+    #
+    # Arguments:
+    # im                    Intensity measure to add
+    # jobTag                mpjobs job tag
+    # dmName dmValue...     IDA results, mutually exclusive with $jobTag
+
+    method add {im args} {
+        # Check for arity errors
+        if {[llength $args] == 0} {
+            return -code error "Must provide job tag or results with intensity"
+        }
+        if {[llength $args]%2 == 1 && [llength $args] != 1} {
+            return -code error "Incorrect number of input arguments"
+        }
+        
+        # Handle overwrite case
+        if {[dict exists $idaData $im] && ![dict exists $im2job $im]} {
+            # Remove from data and refresh IDA
+            dict unset idaData $im
+            my Refresh
+        }
+        
+        # If new, add to intensity list and remove from queue if needed.
+        # --------------------------------------------------------------
+        if {![dict exists $idaData $im] && $im != 0.0} {
+            # Add to intensity measure list
+            set imIndex [lsearch -sorted -bisect -real $imList $im]
+            set imList [linsert $imList $imIndex+[set imList 1] $im]
+            # Remove from fill queue if needed
+            if {$stage == 3} {
+                set queueIndex [lsearch -exact -real $fillQueue $im]
+                if {$queueIndex == -1} {
+                    # Queue must be reset if new point was added.
+                    set fillQueue ""
+                } else {
+                    set fillQueue [lreplace $fillQueue $queueIndex $queueIndex]
+                    # Queue has been exhausted.
+                    if {[llength $fillQueue] == 0} {
+                        set stage 4
+                    }
+                }; # end if intensity found in queue
+            }; # end if stage is 3
+        }; # end if new
+        
+        # Switch for arity
+        # --------------------------------------------------------------
+        if {[llength $args] == 1} {
+            # Adding a job, does not change stage
+            set jobTag [lindex $args 0]
+            dict set idaData $im jobTag $jobTag
+            # Check status of job
+            set status [::mpjobs::getJobStatus $jobTag]
+            if {$status == 0} {
+                # Run the job, either in series or in parallel
+                ::mpjobs::runJobs $jobTag
+                set status [::mpjobs::getJobStatus $jobTag]
+            }
+            if {$status == 1} {
+                # Running asyncronously
+                dict set im2job $im $jobTag
+                return
+            } elseif {$status == 3} {
+                # Job resulted in error
+                return -code error "Error in job $jobTag"
+            }; # end switch job status
+            set results [::mpjobs::getJobResults $jobTag]
+        } else {
+            # Adding results from completed job
+            set results $args
+        }
+        # Remove reserved keys (allows for easy loading of idaTable)
+        dict unset results intensity
+        dict unset results jobTag
+        dict unset results collapsed
+        foreach name [dict keys $collapseCriteria] {
+            dict unset results $name
+        }
+        # Add results to idaData
+        dict set idaData $im results $results
+        # Remove from active job map
+        dict unset im2job $im
+
+        # Update collapse data
+        # --------------------------------------------------------------
+        set newCollapse 0; # boolean, whether a new collapse point found
+        foreach {name criterion} $collapseCriteria {
+            set oldCollapse [dict get $collapseData $name]
+            if {$oldCollapse eq "" || $im < $oldCollapse} {
+                lassign $criterion dm op limit
+                if [list [dict get $results $dm] $op $limit] {
+                    dict set collapseData $name $im
+                    set newCollapse 1
+                }
+            }
+        }
+        
+        # Update collapse and capacity
+        # --------------------------------------------------------------
+        set oldCapacity $capacity; # For comparison later
+        if {$newCollapse} {
+            set collapsed 1
+            set collapses [concat {*}[dict values $collapseData]]
+            set minCollapse [::tda::min $collapses]
+            if {$im == $minCollapse} {
+                # New minimum collapse, redefine capacity
+                set imIndex [lsearch -sorted -exact -real $imList $im]
+                set capacity [lindex $imList $imIndex-1]
+            }
+        } elseif {$collapsed} {
+            # New capacity? (between capacity and minCollapse)
+            if {$im > $capacity && $im < $minCollapse} {
+                set capacity $im
+            }
+        } else {
+            # Tentative capacity is simply last point
+            set capacity [lindex $imList end]
+        }
+        
+        # If capacity changed, reset stage if needed and update any suites
+        if {$stage > 2 && $oldCapacity != $capacity} {
+            set stage 2
+        }
+        
+        # Update the IDA stage
+        my UpdateStage
+        return 
+    }
+    
+    # $ida remove --
+    #
+    # Remove a point from the IDA curve
+    #
+    # Syntax:
+    # $ida remove $im
+    #
+    # Arguments:
+    # im        Intensity measure value associated with IDA curve point
+    
+    method remove {im} {
+        if {[dict exists $idaData $im]} {
+            dict unset idaData $im
+            dict unset im2job $im
+            my Refresh
+        }
+        return
+    }
+    
+    # $ida next --
+    #
+    # Get the next intensity measure. 
+    # Returns -1 if number of active jobs exceeds allowed for stage
+    # Returns -2 if IDA curve is complete.
+    #
+    # Syntax:
+    # $ida next
+    
+    method next {} {      
+        # Handle "active" case
+        if {[dict size $im2job] > 0 && $stage != 3} {
+            return -1
+        }
+
+        # Get the next intensity based on stage.
+        switch $stage {
+            0 { # Simply return the starting value based on huntup method
+                set im $huntStart
+            }
+            1 { # Return value according to huntup method.
+                set im1 [lindex $imList end-1]
+                set im2 [lindex $imList end]
+                set gap [expr {$im2 - $im1}]
+                switch $huntType {
+                    Geometric {
+                        # Apply a scale factor to last factor.
+                        set im [expr {$im2 * $huntStep}]
+                    }
+                    Quadratic {
+                        # Add step to previous step
+                        set im [expr {$im2 + $gap + $huntStep}]
+                    }
+                    Linear {
+                        # Simply add step
+                        set im [expr {$im2 + $huntStep}]
+                    }
+                }; # end switch type
+            }
+            2 { # Bracketing. Bisect capacity and minimum collapse points.
+                set im [expr {($capacity + $minCollapse)/2.0}]
+            }
+            3 { # Fill-in.
+                set im [lindex $fillQueue 0]
+            }
+            4 { # Completed (parLevel for stage 4 is always 0)
+                return -2
+            }
+        }; # end switch stage
+        
+        # Return the intensity measure.
+        return $im
+    }
+    
+    # $ida run --
+    #
+    # Run the IDA. The body must evaluate to a jobTag or result list.
+    # Acts like a normal Tcl loop, but "continue" is not very meaningful.
+    #
+    # Syntax:
+    # $ida run $imVar $body
+    #
+    # Arguments:
+    # imVar     Variable to pass the intensity measure to
+    # body      Body of run loop. Must evaluate to a jobTag or a result dict
+    
+    method run {imVar body} {
+        upvar $imVar im
+        while {1} {
+            my update
+            set im [my next]
+            if {$im == -1} {
+                after 10; # Wait a split second
+                continue
+            } elseif {$im == -2} {
+                break
+            }
+            # Add point, returning on error and return
+            try {
+                my add $im {*}[uplevel 1 $body]
+            } on return {result options} {
+                return -options $options $result
+            } on error {result options} {
+                return -options $options $result
+            }
+        }
+        return
+    }
+     
+    # $ida complete --
+    #
+    # Returns true if the IDA curve is complete.
+    # Same as checking if next is -2
+    #
+    # Syntax:
+    # $ida complete
+    
+    method complete {} {
+        expr {[my next] == -2}
+    }
+    
+    # $ida collapsed --
+    #
+    # Returns whether collapse has been reached
+    #
+    # Syntax:
+    # $ida collapsed
+    
+    method collapsed {} {
+        return $collapsed
+    }
+     
+    # $ida stage --
+    #
+    # Return the current stage of the IDA algorithm
+    #
+    # Syntax:
+    # $ida stage
+    
+    method stage {} {
+        return $stage
+    }
+    
+    # $ida capacity -- 
+    # 
+    # Return the estimated capacity IM of the IDA curve
+    #
+    # Syntax:
+    # $ida capacity
+    
+    method capacity {} {
+        return $capacity
+    }
+    
+    # $ida minCollapse --
+    #
+    # Returns the minimum collapse, optionally for a collapse name
+    # Returns error if the collapse name does not exist.
+    # Returns blank if no collapse is reached.
+    #
+    # Syntax:
+    # $ida minCollapse $name
+    #
+    # Arguments:
+    # name      Collapse name. Default "", for min of all collapse conditions
+    
+    method minCollapse {{name ""}} {
+        if {$name eq ""} {
+            return $minCollapse
+        }
+        if {![dict exists $collapseData $name]} {
+            return -code error "Unknown collapse name"
+        }
+        return [dict get $collapseData $name]
+    }
+    
+    # $ida collapseData --
+    #
+    # Returns a dictionary of collapse names and the minimum collapse for each.
+    #
+    # Syntax:
+    # $ida collapseData
+    
+    method collapseData {} {
+        return $collapseData
+    }
+    
+    # $ida getIMs --
+    #
+    # Returns a list of all defined intensities, in increasing order
+    #
+    # Syntax:
+    # $ida getIMs
+    
+    method getIMs {} {
+        return $imList
+    }
+    
+    # $ida curve --
+    # 
+    # Returns a matrix, with first column damage measure, second intensity,
+    # in increasing order of intensity measure.
+    #
+    # Syntax:
+    # $ida curve $dm
+    #
+    # Arguments:
+    # dm:       Damage measure
+
+    method curve {dm} {
+        lmap im $imList {
+            if {![dict exists $idaData $im results $dm]} {continue}
+            list [dict get $idaData $im results $dm] $im
+        }
+    }
+    
+    # $ida table --
+    #
+    # Return a table with all intensities and damage measure data
+    # First columns are "intensity" and "jobTag"
+    # Middle columns are the damage measure names (from results dictionary)
+    # Last columns are "collapsed" and the collapse criteria names.
+    #
+    # Syntax:
+    # $ida table
+    
+    method table {} {
+        set idaTable [::tda::tbl new]
+        # Define main properties
+        $idaTable define keyname intensity
+        $idaTable define fields jobTag
+        $idaTable define keys $imList
+        # Fill with job tags and damage measure results
+        dict for {im data} $idaData {
+            if {[dict exists $data jobTag]} {
+                $idaTable set $im jobTag [dict get $data jobTag]
+            }
+            if {[dict exists $data results]} {
+                $idaTable set $im {*}[dict get $data results]
+            }
+        }
+        # Fill in with zero-points (if zero point not added)
+        if {![dict exists $idaData 0.0]} {
+            $idaTable rset 0.0 0.0
+        }
+        # Add "collapsed" fields for easy sorting
+        $idaTable fedit collapsed {@intensity > $capacity}
+        dict for {name im} $collapseData {
+            $idaTable fedit $name {$im eq "" ? 0 : @intensity >= $im}
+        }
+        return $idaTable
+    }
+    
+    # Private methods:
+    # ----------------------------------------------------------------------
+    
+    # my Refresh --
+    #
+    # Re-adds all data points, computing capacity and collapses.
+    #
+    # Syntax:
+    # my Refresh
+    
+    method Refresh {} {
+        # Reset all IDA state data (except saved data)
+        set capacity 0.0
+        set collapsed 0
+        set fillQueue ""
+        set minCollapse ""
+        set collapseData ""
+        foreach {name criterion} $collapseCriteria {
+            dict set collapseData $name ""
+        }
+        set stage 0
+        
+        # Re-add IDA data points
+        set imList 0.0
+        set im2job ""
+        dict for {im data} $idaData[set idaData ""] {
+            if {[dict exists $data jobTag]} {
+                my add $im [dict get $data jobTag]
+            }
+            if {[dict exists $data results]} {
+                my add $im {*}[dict get $data results]
+            }
+        }
+    }
+    
+    # my ApplySettings --
+    #
+    # Checks the settings inputs for validity.
+    # See comments in switch statement for option syntax.
+    #
+    # Syntax:
+    # my ApplySettings <$option $value ...>
+    # 
+    # Arguments:
+    # option        Settings option (see switch statement)
+    # value         Value for settings option (see switch statement)
+    
+    method ApplySettings {args} {
+        # Check arity
+        if {[llength $args] % 2 == 1} {
+            return -code error "wrong # of args: want option-value pairs"
+        }
+        # Loop through settings, checking validity
+        dict for {option value} $args {
+            # Switch for option, with basic config checks
+            switch $option {
+                -huntup {
+                    # -huntup defines initial IDA behavior
+                    # Three options are provided. 
+                    #   Geometric multiplies the last IM by the step.
+                    #   Quadratic adds the step to the IM gap.
+                    #   Linear simply steps by the step size.
+                    # Example: -huntup "Geometric 0.1 2.0"
+                    if {[llength $value] != 3} {
+                        return -code error "wrong # of -huntup args"
+                    }
+                    lassign $value type start step
+                    if {$type ni {Geometric Quadratic Linear}} {
+                        return -code error "Try Geometric, Quadratic, or Linear"
+                    }
+                    if {![string is double -strict $start]} {
+                        return -code error "Start must be number"
+                    } elseif {$start <= 0.0} {
+                        return -code error "Start must be greater than zero"
+                    }
+                    if {![string is double -strict $step]} {
+                        return -code error "Step must be number"
+                    } elseif {$type eq {Geometric} && $step <= 1.0} {
+                        return -code error "Geometric step must be > 1.0"
+                    } elseif {$type eq {Quadratic} && $step < 0.0} {
+                        return -code error "Quadratic step must be >= 0.0"
+                    } elseif {$type eq {Linear} && $step < 0.0} {
+                        return -code error "Linear step must be >= 0.0"
+                    }
+                }
+                -collapse {
+                    # -collapse defines collapse: name criterion ...
+                    # criterion must be in format "dm op limit"
+                    # Example: -collapse {SC {code != 0} NSC {drift > 0.10}}
+                    if {[llength $value] % 2 == 1} {
+                        return -code error "wrong # of -collapse args"
+                    }
+                    # Verify that input is valid
+                    foreach {name criterion} $value {
+                        if {$name eq ""} {
+                            return -code error "Name cannot be blank"
+                        }
+                        foreach {dm op limit} $criterion {
+                            if {$op ni {== != > < >= <= in ni eq ne}} {
+                                return -code error "Invalid comparison operator"
+                            }
+                        }
+                    }
+                }
+                -precision {
+                    # -precision defines intensity measure precisions
+                    # Example: -precision "0.05 0.1"
+                    if {[llength $value] != 2} {
+                        return -code error "wrong # of -precision args"
+                    }
+                    foreach tol $value {
+                        if {![string is double -strict $tol] || $tol <= 0.0} {
+                            return -code error "-precision must be number > 0"
+                        }
+                    }
+                }
+                -limits {
+                    # Thresholds for fragility refining
+                    if {[llength $value] != 2} {
+                        return -code error "wrong # of -limits args"
+                    }
+                    lassign $value min max
+                    if {$min > $max} {
+                        return -code error "min must be <= max"
+                    }
+                    if {$min < 0.0} {
+                        return -code error "min out of range"
+                    }
+                }
+                default {
+                    return -code error "Unknown setting \"$option\""
+                }
+            }; # end switch
+        }
+        # Merge into main settings variable, and apply to specific variables
+        set settings [dict merge $settings $args]
+        lassign [dict get $settings -huntup] huntType huntStart huntStep
+        lassign [dict get $settings -precision] huntPrecision fillPrecision
+        lassign [dict get $settings -limits] lowerLimit upperLimit
+        set collapseCriteria [dict get $settings -collapse]
+        return
+    }
+    
+    # my UpdateStage --
+    #
+    # Private method to update the IDA stage and the fillQueue.
+    #
+    # Syntax:
+    # my UpdateStage
+    
+    method UpdateStage {} {
+        # IDA is done, return immediately
+        if {$stage == 4} {
+            return
+        }
+        # Handle initialization
+        if {$stage == 0} {
+            if {[llength $imList] == 0} {
+                return
+            }
+            if {[llength $imList] == 1 && [lindex $imList 0] == 0.0} {
+                return
+            }
+            set stage 1
+        }
+        # From here, stage must be >= 1 ...
+
+        # If in hunt-up stage and a collapse is found, go to bracketing.
+        if {$stage == 1 && $collapsed} {
+            set stage 2
+        }
+        
+        # Don't hunt if capacity is above upper limit
+        if {$stage <= 2 && $capacity > $upperLimit} {
+            set stage 3
+            set fillQueue ""
+        }
+        
+        # If in bracketing stage and precision is met, go to fill-in.
+        if {$stage == 2 && ($minCollapse - $capacity) <= $huntPrecision} {
+            set stage 3
+            set fillQueue ""
+        }
+        
+        # Skip fill if collapse equals or is below lower limit
+        if {$collapsed && $minCollapse <= $lowerLimit} {
+            set stage 4
+            return
+        }
+        
+        # Create fill queue if not initialized
+        if {$stage == 3 && [llength $fillQueue] == 0} {
+            # Get list of IMs to pass to "GenerateQueue"
+            if {$capacity < $lowerLimit} {
+                # Zone 1
+                set ims ""
+            } elseif {$capacity <= $upperLimit} {
+                # Zone 2
+                set i [lsearch -sorted -real -bisect $imList $capacity]
+                set ims [lrange $imList 0 $i]
+            } else {
+                # Zone 3 ($capacity > $upperLimit)
+                set i [lsearch -sorted -real -bisect $imList $upperLimit]
+                set ims [lrange $imList 0 $i+1]
+            }
+            # Get fillQueue
+            set fillQueue [::ooida::GenerateQueue $ims $fillPrecision]
+            # If precision already met, advance to stage 4 (finishing)
+            if {[llength $fillQueue] == 0} {
+                set stage 4
+            }
+        }
+        return
+    }
+}; # end class definition
+
+# suite --
+#
+# Ground motion suite class
+# Creates suite of IDA objects, simplifying running multiple IDAs, especially
+# for determining the median collapse intensity
+
+oo::class create ::ooida::suite {
+    variable ida; # Array of IDA objects in suite
+    variable cdf; # Array of CDF fragility values for each ground motion
+    variable gmList; # List of all ground motions
+    variable gmIndex; # Index of next ground motion to run
+    variable medianSearch; # Boolean, whether to do median fragility search
+    
+    # suite new/create --
+    #
+    # Constructor for suite objects
+    # 
+    # Syntax:
+    # suite new <-medianSearch $medianSearch>
+    # suite create $name <-medianSearch $medianSearch>
+    #
+    # Arguments:
+    # name              Name of suite object
+    # medianSearch      Option to do median CDF search, default false
+    
+    constructor {args} {
+        # Check arity
+        if {[llength $args] % 2 == 1} {
+            return -code error "wrong # of args: want option value ..."
+        }
+        
+        # Process suite options
+        set medianSearch false
+        foreach {option value} $args {
+            switch $option {
+                -medianSearch {
+                    set medianSearch [expr {bool($value)}]
+                }
+            }
+        }
+        
+        # Initialize ground motion list and index
+        set gmList ""
+        set gmIndex 0
+        return
+    }
+    
+    # $suite destroy --
+    #
+    # Destructor for suite objects, also destroys all linked IDA objects
+    #
+    # Syntax:
+    # $suite destroy
+    
+    destructor {
+        foreach gm $gmList {
+            catch {$ida($gm) destroy}
+        }
+    }
+    
+    # $suite add --
+    # 
+    # Adds a ground motion to the suite, with a corresponding IDA object
+    #
+    # Syntax:
+    # $suite add $gm $idaObj
+    #
+    # Arguments:
+    # gm            Ground motion
+    # idaObj        IDA object to associate with ground motion
+    
+    method add {gm idaObj} {
+        if {![info object class $idaObj ::ooida::ida]} {
+            return -code error "\"$idaObj\" is not an IDA object"
+        }
+        if {![info exists ida($gm)]} {
+            lappend gmList $gm
+        }
+        set ida($gm) $idaObj
+        set cdf($gm) 0.0
+        # Set up trace to update fragility when capacity changes
+        trace add variable [info object namespace $idaObj]::capacity \
+                write [list apply [list args [list [self namespace]::my \
+                UpdateFragility]]]
+        # Add new method to access cdf value
+        ::oo::objdefine $idaObj method cdf {} \
+                "return \$[self namespace]::cdf($gm)"
+        return
+    }
+    
+    # $suite remove --
+    #
+    # Remove a ground motion from the suite. 
+    # Does not complain if the gm is not in the suite.
+    #
+    # Syntax:
+    # $suite remove $gm
+    #
+    # Arguments:
+    # gm            Ground motion to remove from suite
+    
+    method remove {gm} {
+        if {![info exists ida($gm)]} {
+            return
+        }
+        # Remove tracer on IDA object
+        trace remove variable [info object namespace $ida($gm)]::capacity \
+                write [list apply [list args [list [self namespace]::my \
+                UpdateFragility]]]
+        # Delete cdf method
+        ::oo::objdefine $object deletemethod cdf
+        # Remove ground motion from internal data structures
+        set i [lsearch -exact $gmList $gm]
+        set gmList [lreplace $gmList $i $i]
+        unset ida($gm)
+        unset cdf($gm)
+        # Update fragility data and median search limits
+        my UpdateFragility
+    }
+    
+    # $suite next --
+    # 
+    # Get the next ground motion and intensity measure
+    # If waiting on results, returns "" and -1.
+    # If all ground motions are done, returns "" and -2.
+    #
+    # Syntax:
+    # $suite next
+    
+    method next {} {
+        set doneCount 0
+        for {set i 0} {$i < [llength $gmList]} {incr i} {
+            set gm [lindex $gmList $gmIndex]
+            set im [$ida($gm) next]
+            # Get next ground motion index
+            incr gmIndex
+            if {$gmIndex == [llength $gmList]} {
+                set gmIndex 0
+            }
+            # Return a valid point if IM is non-negative
+            if {$im >= 0} {
+                return [list $gm $im]
+            }
+            if {$im == -2} {
+                incr doneCount
+            }
+        }
+        # Final condition
+        if {$doneCount == [llength $gmList]} {
+            return [list "" -2]
+        }
+        # Waiting condition
+        return [list "" -1]
+    }
+    
+    # $suite complete --
+    # 
+    # Queries if the suite is complete, without changing gmIndex
+    #
+    # Syntax:
+    # $suite complete 
+    
+    method complete {} {
+        set oldIndex $gmIndex
+        lassign [my next] gm im
+        set gmIndex $oldIndex
+        return [expr {$im == -2}]
+    }
+
+    # $suite update --
+    #
+    # Updates all IDA objects
+    #
+    # Syntax:
+    # $suite update 
+    
+    method update {} {
+        foreach gm $gmList {
+            $ida($gm) update
+        }
+    }
+    
+    # $suite run --
+    #
+    # Runs the suite of IDA in a loop, returning on break or return
+    # If "continue" is called, it will skip to the next ground motion
+    #
+    # Syntax:
+    # $suite run $gmVar $imVar $body
+    #
+    # Arguments:
+    # gmVar     Variable to pass ground motion to
+    # imVar     Variable to pass intensity measure to
+    # body      Body of run loop. Must evaluate to a jobTag or a result dict
+    
+    method run {gmVar imVar body} {
+        upvar $gmVar gm
+        upvar $imVar im
+        while {1} {
+            my update
+            lassign [my next] gm im
+            if {$im == -1} {
+                after 10; # Wait a split second
+                continue
+            }
+            if {$im == -2} {
+                break
+            }
+            # Add point, returning on error and return
+            try {
+                $ida($gm) add $im {*}[uplevel 1 $body]
+            } on return {result options} {
+                return -options $options $result
+            } on error {result options} {
+                return -options $options $result
+            }
+        }
+        return
+    }
+
+    # $suite ida --
+    #
+    # Either returns the object, or can be used to directly call IDA methods
+    # 
+    # Syntax:
+    # $suite ida $gm <$args...>
+    # 
+    # Arguments:
+    # gm            Ground motion associated with IDA curve
+    # args          IDA object arguments (e.g. $suite ida $gm stage)
+    
+    method ida {gm args} {
+        my CheckGM $gm
+        if {[llength $args] == 0} {
+            return $ida($gm)
+        }
+        return [$ida($gm) {*}$args]
+    }
+    
+    # $suite getGMs --
+    #
+    # Get all ground motions in suite
+    # 
+    # Syntax:
+    # $suite getGMs
+    
+    method getGMs {} {
+        return $gmList
+    }
+    
+    # $suite table --
+    # 
+    # Get a table with all the fragility data
+    # 
+    # Syntax:
+    # $suite table
+
+    method table {} {
+        # Create table with relevant data
+        set table [::tda::tbl new]
+        $table define keyname groundMotion
+        foreach gm $gmList {
+            $table set $gm capacity [$ida($gm) capacity]
+            $table set $gm cdf $cdf($gm)
+            $table set $gm collapsed [$ida($gm) collapsed]
+            $table set $gm {*}[$ida($gm) collapseData]
+        }
+        $table sort -real capacity
+        return $table
+    }
+
+    # my CheckGM --
+    #
+    # Validates a ground motion (checks if in suite)
+    # 
+    # Syntax:
+    # my CheckGM $gm
+    # 
+    # Arguments:
+    # gm            Ground motion name
+    
+    method CheckGM {gm} {
+        if {![info exists ida($gm)]} {
+            return -code error "Ground motion \"$gm\" not in suite"
+        }
+    }
+    
+    # my UpdateFragility --
+    # 
+    # Private method that updates the suite fragility.
+    #
+    # Syntax:
+    # my UpdateFragility
+    
+    method UpdateFragility {} {
+        # Update fragility values for each ground motion
+        set n [llength $gmList]
+        foreach gm1 $gmList {
+            set im1 [$ida($gm1) capacity]
+            set cdf($gm1) [expr 1.0/(2.0*$n)]; # Initial cdf
+            foreach gm2 $gmList {
+                set im2 [$ida($gm2) capacity]
+                if {$im2 < $im1} {
+                    # Add if the collapse point is below.
+                    set cdf($gm1) [expr $cdf($gm1) + 1.0/$n]
+                }
+            }
+        }
+        # Return if not doing median search
+        if {!$medianSearch} {
+            return
+        }
+        # Configure IDA curves to be restricted based on relative CDF
+        set upperLimit Inf
+        set lowerLimit 0.0
+        foreach gm $gmList {
+            set im [$ida($gm) capacity]
+            if {$cdf($gm) == 0.5} {
+                set lowerLimit $im
+                set upperLimit $im
+            } elseif {$cdf($gm) > 0.5} {
+                set upperLimit [expr {min($im,$upperLimit)}]
+            } else {
+                set lowerLimit [expr {max($im,$lowerLimit)}]
+            }
+        }
+        foreach gm $gmList {
+            $ida($gm) configure -limits [list $lowerLimit $upperLimit]
+        }
+        return
+    }
+    
+}; # end "suite" class definition
+
+# Finally, provide the package
+package provide ooida @VERSION@
