@@ -1,2 +1,2 @@
-# ooida
-Object-Oriented Incremental Dynamic Analysis
+# Object-Oriented Incremental Dynamic Analysis (ooida)
+
