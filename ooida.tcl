@@ -1182,4 +1182,4 @@ oo::class create ::ooida::suite {
 }; # end "suite" class definition
 
 # Finally, provide the package
-package provide ooida 0.1
+package provide ooida 0.1.1
