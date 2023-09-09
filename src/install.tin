@@ -1,5 +1,5 @@
-package require tin 0.4.6
-tin depend mpjobs 0.1
-tin depend tda 0.1
+package require tin 1.0
+tin depend mpjobs @MPJOBS_VERSION@
+tin depend tda @TDA_VERSION@
 set dir [tin mkdir -force ooida @VERSION@]
 file copy LICENSE README.md pkgIndex.tcl ooida.tcl $dir

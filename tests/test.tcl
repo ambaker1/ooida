@@ -1,11 +1,11 @@
-package require tin 0.4.6
+package require tin 1.0
 set dir [file normalize ../build]
 source ../build/pkgIndex.tcl
 tin import mpjobs
 tin import ooida
 tin import tda
 tin import vutil
-tin import assert from flytrap
+tin import assert from tin
 
 # Simple example (in series)
 if {[getPID] == 0} {

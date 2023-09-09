@@ -1,10 +1,12 @@
-package require tin 0.4.6
-set version 0.1
+package require tin 1.0
+set version 0.1.1
 set config [dict create VERSION $version]
+dict set config MPJOBS_VERSION 0.1
+dict set config TDA_VERSION 0.1
 tin bake src/install.tin build/install.tcl $config
 tin bake src/pkgIndex.tin build/pkgIndex.tcl $config
 tin bake src/ooida.tin build/ooida.tcl $config
-tin import assert from flytrap
+tin import assert from tin
 
 # Run tests
 cd tests

@@ -11,9 +11,9 @@
 ################################################################################
 
 # External package dependencies
-package require tda::ndlist 0.1
-package require tda::tbl 0.1
-package require mpjobs 0.1
+package require tda::ndlist @TDA_VERSION@
+package require tda::tbl @TDA_VERSION@
+package require mpjobs @MPJOBS_VERSION@
 
 # Define namespace
 namespace eval ::ooida {
