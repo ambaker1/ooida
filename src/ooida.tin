@@ -11,8 +11,8 @@
 ################################################################################
 
 # External package dependencies
-package require tda::ndlist @TDA_VERSION@
-package require tda::tbl @TDA_VERSION@
+package require vutil @VUTIL_VERSION@
+package require ndlist @NDLIST_VERSION@
 package require mpjobs @MPJOBS_VERSION@
 
 # Define namespace
@@ -83,6 +83,7 @@ proc ::ooida::GetGaps {ims epsilon} {
 ################################################################################
 
 oo::class create ::ooida::ida {
+    superclass ::vutil::GarbageCollector
     # Class variables
     variable settings; # Settings dictionary
     variable lowerLimit upperLimit; # Intensity thresholds for partial IDA
@@ -108,15 +109,16 @@ oo::class create ::ooida::ida {
     # Create an IDA object
     # 
     # Syntax:
-    # ida new <$option $value ...>
-    # ida create $name <$option $value ...>
+    # ida new $varName <$option $value ...>
+    # ida create $name $varName <$option $value ...>
     # 
     # Arguments:
+    # varName       Variable to store object in for garbage collection.
     # name          Name of IDA object.
     # option        Settings option (see "my ApplySettings")
     # value         Value for settings option (see "my ApplySettings")
     
-    constructor {args} {
+    constructor {varName args} {
         # Define default settings
         set settings [dict create {*}{
             -huntup {Geometric 1.0 2.0}
@@ -135,22 +137,7 @@ oo::class create ::ooida::ida {
         
         # Initialize IDA
         my wipe
-        return
-    }
-
-    # $ida copy --
-    #
-    # Shorthand for copying IDA object, calls oo::copy
-    #
-    # Syntax:
-    # $ida copy <$targetObject> <$targetNamespace>
-    # 
-    # Arguments:
-    # targetObject          See oo::copy documentation
-    # targetNamespace       See oo::copy documentation
-    
-    method copy {args} {
-        uplevel 1 [list oo::copy [self] {*}$args]
+        next $varName
     }
     
     # $ida wipe --
@@ -353,7 +340,7 @@ oo::class create ::ooida::ida {
         if {$newCollapse} {
             set collapsed 1
             set collapses [concat {*}[dict values $collapseData]]
-            set minCollapse [::tda::min $collapses]
+            set minCollapse [::ndlist::min $collapses]
             if {$im == $minCollapse} {
                 # New minimum collapse, redefine capacity
                 set imIndex [lsearch -sorted -exact -real $imList $im]
@@ -605,30 +592,30 @@ oo::class create ::ooida::ida {
     # $ida table
     
     method table {} {
-        set idaTable [::tda::tbl new]
+        ::ndlist::table new table
         # Define main properties
-        $idaTable define keyname intensity
-        $idaTable define fields jobTag
-        $idaTable define keys $imList
+        $table define keyname intensity
+        $table define fields jobTag
+        $table define keys $imList
         # Fill with job tags and damage measure results
         dict for {im data} $idaData {
             if {[dict exists $data jobTag]} {
-                $idaTable set $im jobTag [dict get $data jobTag]
+                $table set $im jobTag [dict get $data jobTag]
             }
             if {[dict exists $data results]} {
-                $idaTable set $im {*}[dict get $data results]
+                $table set $im {*}[dict get $data results]
             }
         }
         # Fill in with zero-points (if zero point not added)
         if {![dict exists $idaData 0.0]} {
-            $idaTable rset 0.0 0.0
+            $table rset 0.0 0.0
         }
         # Add "collapsed" fields for easy sorting
-        $idaTable fedit collapsed {@intensity > $capacity}
+        $table cset collapsed [$table expr {@intensity > $capacity}]
         dict for {name im} $collapseData {
-            $idaTable fedit $name {$im eq "" ? 0 : @intensity >= $im}
+            $table cset $name [$table expr {$im eq "" ? 0 : @intensity >= $im}]
         }
-        return $idaTable
+        return [$table]
     }
     
     # Private methods:
@@ -854,6 +841,7 @@ oo::class create ::ooida::ida {
 # for determining the median collapse intensity
 
 oo::class create ::ooida::suite {
+    superclass ::vutil::GarbageCollector
     variable ida; # Array of IDA objects in suite
     variable cdf; # Array of CDF fragility values for each ground motion
     variable gmList; # List of all ground motions
@@ -865,17 +853,19 @@ oo::class create ::ooida::suite {
     # Constructor for suite objects
     # 
     # Syntax:
-    # suite new <-medianSearch $medianSearch>
-    # suite create $name <-medianSearch $medianSearch>
+    # suite new $varName <-medianSearch $medianSearch>
+    # suite create $name $varName <-medianSearch $medianSearch>
     #
     # Arguments:
+    # varName           Variable to store object in for garbage collection.
     # name              Name of suite object
     # medianSearch      Option to do median CDF search, default false
     
-    constructor {args} {
+    constructor {varName args} {
         # Check arity
         if {[llength $args] % 2 == 1} {
-            return -code error "wrong # of args: want option value ..."
+            return -code error "wrong # of args: want \"
+                    suite new varName ?option value ...?\""
         }
         
         # Process suite options
@@ -891,19 +881,19 @@ oo::class create ::ooida::suite {
         # Initialize ground motion list and index
         set gmList ""
         set gmIndex 0
-        return
+        next $varName
     }
     
     # $suite destroy --
     #
-    # Destructor for suite objects, also destroys all linked IDA objects
+    # Destructor for suite objects, removes all ground motions.
     #
     # Syntax:
     # $suite destroy
     
     destructor {
         foreach gm $gmList {
-            catch {$ida($gm) destroy}
+            my RemoveGM $gm
         }
     }
     
@@ -952,12 +942,8 @@ oo::class create ::ooida::suite {
         if {![info exists ida($gm)]} {
             return
         }
-        # Remove tracer on IDA object
-        trace remove variable [info object namespace $ida($gm)]::capacity \
-                write [list apply [list args [list [self namespace]::my \
-                UpdateFragility]]]
-        # Delete cdf method
-        ::oo::objdefine $object deletemethod cdf
+        # Remove all ties to object
+        RemoveGM $gm
         # Remove ground motion from internal data structures
         set i [lsearch -exact $gmList $gm]
         set gmList [lreplace $gmList $i $i]
@@ -965,6 +951,25 @@ oo::class create ::ooida::suite {
         unset cdf($gm)
         # Update fragility data and median search limits
         my UpdateFragility
+    }
+    
+    # my RemoveGM --
+    #
+    # Private method that only removes the ties to the GM object.
+    #
+    # Syntax:
+    # $suite remove $gm
+    #
+    # Arguments:
+    # gm            Ground motion to remove from suite
+    
+    method RemoveGM {gm} {
+        # Remove tracer on IDA object
+        trace remove variable [info object namespace $ida($gm)]::capacity \
+                write [list apply [list args [list [self namespace]::my \
+                UpdateFragility]]]
+        # Delete cdf method
+        ::oo::objdefine $ida($gm) deletemethod cdf
     }
     
     # $suite next --
@@ -1106,7 +1111,7 @@ oo::class create ::ooida::suite {
 
     method table {} {
         # Create table with relevant data
-        set table [::tda::tbl new]
+        ::ndlist::table new table
         $table define keyname groundMotion
         foreach gm $gmList {
             $table set $gm capacity [$ida($gm) capacity]
@@ -1115,7 +1120,7 @@ oo::class create ::ooida::suite {
             $table set $gm {*}[$ida($gm) collapseData]
         }
         $table sort -real capacity
-        return $table
+        return [$table]
     }
 
     # my CheckGM --
