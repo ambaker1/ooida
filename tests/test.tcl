@@ -3,7 +3,7 @@ set dir [file normalize ../build]
 source ../build/pkgIndex.tcl
 tin import mpjobs
 tin import ooida
-tin import tda
+tin import ndlist
 tin import vutil
 tin import assert from tin
 
@@ -13,21 +13,20 @@ if {[getPID] == 0} {
     dict set settings -huntup {Geometric 1.0 2.0}
     dict set settings -collapse {code {y > 10}}
     dict set settings -precision {0.01 0.5}
-    set idaObj [ida new {*}$settings]
+    ida new idaObj {*}$settings
     $idaObj run x {
         list y [expr {$x**2}]
     }
-    set idaTable [$idaObj table]
+    table new idaTable [$idaObj table]
     assert [$idaTable keys] eq {0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.125 3.15625 3.1640625 3.171875 3.1875 3.25 3.5 4.0}
-    assert [$idaTable cget y] eq [vop [$idaTable keys] ** 2]
+    narray new 1 x [$idaTable keys]
+    assert [$idaTable cget y] eq [nexpr {$@x ** 2}]
     $idaTable destroy
 
-    set suite [suite new]
-    $suite add 1 [ida new {*}$settings]
-    $suite add 2 [ida new {*}$settings]
-    $suite add 3 [ida new {*}$settings]
-    $suite add 4 [ida new {*}$settings]
-
+    suite new suite
+    foreach gm {1 2 3 4} {
+        $suite add $gm [ida new ida($gm) {*}$settings]
+    }
     $suite run gm im {
         list y [expr {$gm + $im**2}]
     }
@@ -37,14 +36,12 @@ if {[getPID] == 0} {
 # Initialize job board
 jobBoard -wipe -debug IDA {
     # Create IDA objects
-    set settings ""
-    dict set settings -huntup {Geometric 0.1 2.0}
-    dict set settings -collapse {NSC {drift > 0.10}}
-    dict set settings -precision {0.1 0.2}
-    set suite [suite new]
-    $suite add 1 [ida new {*}$settings]
-    $suite add 2 [ida new {*}$settings]
-    $suite add 3 [ida new {*}$settings]
+    set config(-huntup) {Geometric 0.1 2.0}
+    set config(-collapse) {NSC {drift > 0.10}}
+    set config(-precision) {0.1 0.2}
+    suite new suite
+    narray new 1 gm {1 2 3}
+    neval {$suite add $@gm [ida new ida($@gm) {*}[array get config]]}
 
     # Main loop
     $suite run gm im {
