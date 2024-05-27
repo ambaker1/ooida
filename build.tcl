@@ -1,8 +1,9 @@
 package require tin 1.0
-set version 0.1.1
+set version 0.2
 set config [dict create VERSION $version]
-dict set config MPJOBS_VERSION 0.1
-dict set config TDA_VERSION 0.1
+dict set config MPJOBS_VERSION 0.2
+dict set config NDLIST_VERSION 0.8
+dict set config VUTIL_VERSION 4.0
 tin bake src/install.tin build/install.tcl $config
 tin bake src/pkgIndex.tin build/pkgIndex.tcl $config
 tin bake src/ooida.tin build/ooida.tcl $config
