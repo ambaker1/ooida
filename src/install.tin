@@ -6,4 +6,5 @@ tin depend vutil @VUTIL_VERSION@
 tin depend ndlist @NDLIST_VERSION@
 tin depend mpjobs @MPJOBS_VERSION@
 set dir [tin mkdir -force ooida @VERSION@]
-file copy LICENSE README.md pkgIndex.tcl ooida.tcl $dir
+file copy LICENSE README.md $dir
+file copy pkgIndex.tcl ooida.tcl ida.tcl suite.tcl misc.tcl $dir

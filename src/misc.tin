@@ -1,0 +1,66 @@
+# misc.tcl
+################################################################################
+# Miscellaneous supporting procedures for "ooida" package
+
+# Copyright (C) 2024 Alex Baker, ambaker1@mtu.edu
+# All rights reserved. 
+
+# See the file "LICENSE" in the top level directory for information on usage, 
+# redistribution, and for a DISCLAIMER OF ALL WARRANTIES.
+################################################################################
+
+# GenerateQueue --
+#
+# Get priority list of intensity measures to run (by bisection and trisection)
+#
+# Syntax:
+# GenerateQueue $ims $epsilon
+#
+# Arguments:
+# ims           List of intensity measures, in increasing order
+# epsilon       Maximum gap size
+
+proc ::ooida::GenerateQueue {ims epsilon} {
+    # Initialize gapMap and call recursive function.
+    set gapMap ""
+    GetGaps $ims $epsilon
+    # Return the ims of "map", in order of decreasing gap size
+    return [dict keys [lsort -stride 2 -index 1 -real -decreasing $gapMap]]
+}
+
+# GetGaps --
+# 
+# Recursive function called within GenerateQueue to get a list of gaps 
+# for the purpose of refining the IDA curve.
+# Bisects and calls itself if the gap between consecutive intensities is too 
+# large to meet the precision by trisection or bisection.
+# "gapMap" is a dictionary of intensities and the gaps they split up.
+#
+# Syntax:
+# GetGaps $ims $epsilon
+#
+# Arguments:
+# ims           List of intensity measures, in increasing order
+# epsilon       Maximum gap size
+
+proc ::ooida::GetGaps {ims epsilon} {
+    upvar gapMap gapMap
+    foreach im2 [lassign $ims im1] {
+        set gap [expr {$im2 - $im1}]
+        if {$gap > 3*$epsilon} {
+            # Bisect and recurse
+            set mid [expr {$im1 + $gap/2.0}]
+            dict set gapMap $mid $gap
+            GetGaps [list $im1 $mid $im2] $epsilon
+        } elseif {$gap > 2*$epsilon} {
+            # Trisect to meet precision
+            dict set gapMap [expr {$im1 + $gap/3.0}] $gap
+            dict set gapMap [expr {$im1 + $gap*(2.0/3.0)}] $gap
+        } elseif {$gap > $epsilon} {
+            # Bisect to meet precision
+            dict set gapMap [expr {$im1 + $gap/2.0}] $gap
+        }
+        set im1 $im2
+    }
+    return
+}

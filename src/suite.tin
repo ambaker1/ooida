@@ -1,0 +1,228 @@
+# suite.tcl
+################################################################################
+# IDA suite class for running suite of ground motions
+
+# Copyright (C) 2024 Alex Baker, ambaker1@mtu.edu
+# All rights reserved. 
+
+# See the file "LICENSE" in the top level directory for information on usage, 
+# redistribution, and for a DISCLAIMER OF ALL WARRANTIES.
+################################################################################
+
+# suite --
+#
+# Ground motion suite class
+# Creates suite of IDA objects, simplifying running multiple IDAs, especially
+# for determining the median collapse intensity
+
+# Methods:
+# next: Get the next GM/IM pair 
+# update: Update active jobs
+# run: Run an IDA suite
+# ida: Access IDA object in suite
+
+oo::class create ::ooida::suite {
+    superclass ::vutil::GarbageCollector
+    variable suite; # Array of IDA objects in suite
+    variable searchID; # Array search ID
+    variable medianSearch; # Boolean, whether to do median fragility search
+    variable medianLimits {0 Inf}; # List of limits to assign
+    
+    # suite new/create --
+    #
+    # Constructor for suite objects
+    # 
+    # Syntax:
+    # suite new $varName $idaDict <$p695>
+    # suite create $name $varName $idaDict <$p695>
+    #
+    # Arguments:
+    # varName           Variable to store object in for garbage collection
+    # idaDict           Dictionary of ground motions and IDA objects
+    # p695              Option to do a median CDF search, default false
+    # name              Name of object, used in "create" method
+    
+    # Example application
+    # foreach gm $gmList {
+    #     ida new ida($gm)  
+    # }
+    # suite new suite [array get ida]
+    # $suite run gm im {
+    #   source Analysis.tcl
+    # }
+    
+    constructor {varName idaDict {p695 0}} {
+        # Ensure that input is dictionary and size > 0
+        if {[dict size $idaDict] == 0} {
+            return -code error "must provide at least one IDA in suite"
+        }
+        
+        # Verify that objects are of class "ida"
+        dict for {gm ida} $idaDict {
+            if {![info object class $ida ::ooida::ida]} {
+                return -code error "\"$ida\" is not an IDA object"
+            }
+        }
+        
+        # Determine whether to do median search. 
+        # The FEMA P695 permits a partial IDA, only needs median capacity.
+        set medianSearch [expr {bool($P695)}]
+        
+        # Save in array, and initialize search
+        # Array search is used to save the loop state, similar to a coroutine.
+        array set suite $idaDict
+        my StartArraySearch
+
+        # Set up garbage collection
+        next $varName
+    }
+    
+    # my StartArraySearch --
+    #
+    # Private method used in constructor and method "next" for updating the
+    # suite search after every loop through all the ground motions.
+    
+    method StartArraySearch {} {
+        # Start the array search
+        set searchID [array startsearch suite]
+        # Update limits for median search, if required
+        if {$medianSearch} {
+            # Get list of minimum capacity intensity measures
+            set minCapacity [lmap {gm ida} [array get suite] {
+                lindex [$ida capacity] 0
+            }]
+            # Get median intensity measure
+            set medianCapacity [::ndlist::median $minCapacity]
+            # Determine limits
+            set lowerLimit 0.0
+            set upperLimit Inf
+            foreach im $minCapacity {
+                if {$im == $medianCapacity} {
+                    set lowerLimit $im
+                    set upperLimit $im
+                } elseif {$im > $medianCapacity} {
+                    set upperLimit [expr {min($im,$upperLimit)}]
+                } else {
+                    set lowerLimit [expr {max($im,$lowerLimit)}]
+                }
+            }
+            # Update if limits changed
+            if {$medianLimits ne [list $lowerLimit $upperLimit]} {
+                set medianLimits [list $lowerLimit $upperLimit]
+                foreach {gm ida} [array get suite] {
+                    $ida configure -limits $medianLimits
+                }
+            }
+        }
+    }
+    
+    # $suite next --
+    # 
+    # Get the next ground motion and intensity measure
+    # If waiting on results, returns "" and -1.
+    # If all ground motions are done, returns "" and -2.
+    #
+    # Syntax:
+    # $suite next
+    
+    method next {} {
+        set doneCount 0
+        for {set i 0} {$i < [array size suite]} {incr i} {
+            # If search is exhausted, start again, updating limits if needed.
+            if {![array anymore suite $searchID]} {
+                array donesearch suite $searchID
+                my StartArraySearch
+            }
+            # Get next ground motion
+            set gm [array nextelement suite $searchID]
+            # Get next intensity measure
+            set im [$suite($gm) next]
+            # Return a valid point if IM is non-negative
+            if {$im >= 0} {
+                return [list $gm $im]
+            }
+            # If the IM is -2, this means the IDA is complete.
+            if {$im == -2} {
+                incr doneCount
+            }
+        }
+        # Final condition
+        if {$doneCount == [llength $gmList]} {
+            return [list "" -2]
+        }
+        # Waiting condition
+        return [list "" -1]
+    }
+
+    # $suite update --
+    #
+    # Updates all IDA objects
+    #
+    # Syntax:
+    # $suite update 
+    
+    method update {} {
+        foreach {gm ida} [array get suite] {
+            $ida update
+        }
+    }
+    
+    # $suite run --
+    #
+    # Runs the suite of IDA in a loop, returning on break or return
+    # If "continue" is called, it will skip to the next ground motion
+    #
+    # Syntax:
+    # $suite run $gmVar $imVar $body
+    #
+    # Arguments:
+    # gmVar     Variable to pass ground motion to
+    # imVar     Variable to pass intensity measure to
+    # body      Body of run loop. Must evaluate to a jobTag or a result dict
+    
+    method run {gmVar imVar body} {
+        upvar $gmVar gm
+        upvar $imVar im
+        while {1} {
+            my update
+            lassign [my next] gm im
+            if {$im == -1} {
+                after 10; # Wait a split second
+                continue
+            }
+            if {$im == -2} {
+                break
+            }
+            # Add point, returning on error and return
+            try {
+                $ida($gm) add $im {*}[uplevel 1 $body]
+            } on return {result options} {
+                return -options $options $result
+            } on error {result options} {
+                return -options $options $result
+            }
+        }
+        return
+    }
+
+    # $suite ida --
+    #
+    # Either returns the object, or can be used to directly call IDA methods
+    # 
+    # Syntax:
+    # $suite ida $gm <$args...>
+    # 
+    # Arguments:
+    # gm            Ground motion associated with IDA curve
+    # args          IDA object arguments (e.g. $suite ida $gm stage)
+    
+    method ida {gm args} {
+        if {[llength $args] == 0} {
+            return $suite($gm)
+        }
+        return [$suite($gm) {*}$args]
+    }
+}; # end "suite" class definition
+
+# Finally, provide the package
+package provide ooida @VERSION@
