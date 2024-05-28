@@ -9,3 +9,5 @@ tests/IDA
 !doc/references/
 !doc/references/*.bib
 !doc/references/*.tex
+!doc/figures/
+!doc/figures/*.pdf
