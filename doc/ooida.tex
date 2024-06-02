@@ -18,26 +18,14 @@
 \title{\LARGE Object-Oriented Incremental Dynamic Analysis (ooida)\\\small Version \version}
 \author{Alex Baker\\\small\url{https://github.com/ambaker1/ooida}}
 \date{\small\today}
-\makeindex[columns=1,title={Command Index}]
 \begin{document}
 \maketitle
-\thispagestyle{empty}
 \clearpage
-\fancypagestyle{plain}[foreword]{}
-\pagestyle{plain}
-\clearpage
-\pagenumbering{roman}
-\tableofcontents
-\markboth{}{}
-\clearpage
-\fancypagestyle{plain}[chapter]{}
-\pagestyle{main}
-\pagenumbering{arabic}
 \section{General}
 Incremental Dynamic Analysis (IDA) is a methodology for collapse assessment of buildings, and is essentially a parametric study, investigating the nonlinear response of a structure exposed to different earthquakes at increasing intensity. 
 Of primary interest is to determine, at a high resolution, the collapse capacity of the structure for the given ground motion.
 Of secondary interest is to trace the curve below the capacity point, to ensure that the capacity point is not part of a ``structural resurrection''.
-The main hunt-fill tracing algorithm in this package is based on the original paper by Vamvatsikos and Cornell 2002 \cite{vamvatsikos_incremental_2002} and the parallel processing implementation is based on that described by Vamvatsikos and Cornell 2011 \cite{vamvatsikos_performing_2011}.
+The tracing algorithm used is based on the original ``hunt-fill'' algorithm by Vamvatsikos and Cornell  \cite{vamvatsikos_incremental_2002,vamvatsikos_performing_2011}, modified as described in \cite{baker_kinematics_2022}.
 
 In similar fashion to the traditional hunt-fill tracing algorithm, the ``ooida'' package hunts for the capacity point and fills in the curve using a multi-staged approach:
 \begin{enumerate}[label=\quad Stage \arabic*:,itemindent=*]
@@ -46,63 +34,107 @@ In similar fashion to the traditional hunt-fill tracing algorithm, the ``ooida''
   \item ``Hunt-up'' stage, where it will increase the intensity until collapse is reached. 
   \item ``Bracketing'' stage, where it bisects to achieve desired precision on collapse capacity. 
   \item ``Fill-in'' stage, where the gaps below collapse are refined to achieve desired curve granularity. 
-  \item Completion stage: collapse is reached and the curve is filled, but jobs may still be active.
+  \item Completion stage: collapse is reached and the all tolerances are met.
 \end{enumerate}
-
-\subsection{Package Dependencies}
-Due to the multi-stage nature of an IDA algorithm, and to facilitate running multiple IDA curves simultaneously, an Object-Oriented approach was adopted, using the standard ``TclOO'' package. 
-
-Besides being able to run multiple IDA curves in parallel, intra-record parallelization (running multiple runs for a single curve simultaneously) is supported by the IDA algorithm for the ``fill-in'' stage, and implemented for OpenSeesMP using the ``mpjobs'' framework: \url{https://github.com/ambaker1/mpjobs}
-
-As with the ``mpjobs'' framework, the ``ooida'' package utilizes the tabular data structure provided by the ``Tda'' package:
-\url{https://github.com/ambaker1/Tda}.
-
-All package dependencies are automatically installed if ``ooida'' is installed with the ``Tin'' package: \\\url{https://github.com/ambaker1/Tin}.
-
-\clearpage
-\section{Creating IDA Objects}
-IDA objects are created from the \cmdlink{ida} class using the standard methods \textit{new} or \textit{create}.
-Both class methods require definition of IDA settings \texttt{-collapse} and \texttt{-precision}. 
-Once created, \cmdlink{ida} objects act as commands with an ensemble of subcommands, or methods. 
-These objects can be copied with the method \methodlink[0]{ida}{copy} and deleted with the method \methodlink[0]{ida}{destroy}.
-\begin{syntax}
-\command{ida} new \$option \$value ... \\
-ida create \$objectName \$option \$value ...
-\end{syntax}
-\begin{args}
-\$objectName & Explicit name for object. \\
-\$option \$value ... & Paired list of IDA options and corresponding values, see \methodlink{ida}{configure}.
-\end{args}
-\begin{example}{Creating an IDA object}
+\subsection{Installation and Use}
+The ``ooida'' package and its dependencies can be installed with \textcolor{blue}{\href{https://github.com/ambaker1/Tin}{Tin}}, a package manager for Tcl.
+The code below handles installation and importing of all commands.
+\begin{example}{Installing and Importing ``ooida''}
 \begin{lstlisting}
-set settings {}
-dict set settings -huntup {Geometric 1.0 2.0}
-dict set settings -collapse {SC {code != 0} NSC {drift > 0.10}}
-dict set settings -precision {0.01 0.1}
-set idaObj [ida new {*}$settings]
+package require tin
+tin add -auto ooida https://github.com/ambaker1/ooida install.tcl
+tin import ooida
 \end{lstlisting}
 \end{example}
 
-\subsection{Copying IDA Objects}
-The method \methodlink[0]{ida}{copy} copies all the data from an IDA object to a new object.
-\begin{syntax}
-\method{ida}{copy} <\$objectName>
-\end{syntax}
-\begin{args}
-\$objectName & Explicit name for object. By default, returns an auto-generated name.
-\end{args}
-\subsection{Removing IDA Objects}
-The standard method \methodlink[0]{ida}{destroy} removes an IDA object from the interpreter. 
-\begin{syntax}
-\method{ida}{destroy}
-\end{syntax}
 
 \clearpage
+\section{Creating IDA Objects}
+The command \cmdlink{ida} is a TclOO class based on the superclass \textit{::vutil::ValueContainer}, from the package \textcolor{blue}{\href{https://github.com/ambaker1/vutil}{vutil}}. 
+It is an object-oriented approach to running Incremental Dynamic Analysis.
+\begin{syntax}
+\command{ida} new \$varName <\$value> <\$settings> \\
+ida create \$name \$varName <\$value> <\$settings>
+\end{syntax}
+\begin{args}
+\$varName & Variable to tie to IDA object. \\
+\$value & Dictionary of intensity measures and collapse codes. Default blank. \\
+\$settings & Settings dictionary. Default blank. See \methodlink{ida}{configure} for options.
+\end{args}
+
+\subsection{Copying IDA Objects}
+The copy operator, ``\texttt{-{}->}'', copies the IDA to a new variable, and returns the new object.
+\begin{syntax}
+\index{ida methods!-{}->} \$idaObj -{}-> \$varName
+\end{syntax} 
+\begin{args}
+\$varName & Variable to store object name for access and garbage collection. 
+\end{args}
+
+\subsection{Destroying IDA Objects}
+Objects can either be destroyed with the method \methodlink[0]{ida}{destroy}, or by simply unsetting or overwriting the variable that it is tied to.
+\begin{syntax}
+\method{ida}{destroy}
+\end{syntax} 
+
+Below is a simple example of how you create, copy, and delete IDA objects
+\begin{example}{Creating IDA objects}
+\begin{lstlisting}
+ida new x {1.0 0 2.0 1}; # create new IDA object
+$x --> y; # copy IDA object to new variable
+unset x; # destroys object stored in x
+\end{lstlisting}
+\end{example}
+\clearpage
+
+\subsection{Access/Modification}
+The IDA data can be accessed by calling the IDA object without any methods, and the value can be overwritten with the assignment operator ``\texttt{=}''. 
+The assignment operator returns the IDA object.
+\begin{syntax}
+\index{ida methods!=} \$idaObj = \$value
+\end{syntax}
+\begin{args}
+\$value & Dictionary of intensity measures and collapse codes.
+\end{args}
+
+The methods \methodlink[0]{ida}{set} and \methodlink[0]{ida}{unset} add or remove points from the IDA curve.
+Both methods return the object.
+
+\begin{syntax}
+\method{ida}{set} \$im \$code
+\end{syntax}
+\begin{args}
+\$im & Intensity measure. \\
+\$code & Boolean collapse code. 0 for no collapse. 
+\end{args}
+
+\begin{syntax}
+\method{ida}{unset} \$im
+\end{syntax}
+\begin{args}
+\$im & Intensity measure. 
+\end{args}
+
+\begin{example}{Creating and Modifying IDA objects}
+\begin{lstlisting}
+ida new x; # create new IDA object
+$x = {1.0 0 2.0 1}
+$x set 1.5 1
+$x unset 2.0
+puts [$x]
+\end{lstlisting}
+\tcblower
+\begin{lstlisting}
+1.0 0 1.5 1
+\end{lstlisting}
+\end{example}
+\clearpage
+
 \section{IDA Configuration}
 The settings of an IDA object can be queried and modified with the method \methodlink[0]{ida}{configure}.
 If this method is called with no arguments, it returns a dictionary of all configuration settings. 
 If called with a single argument, it will return the current configuration for the specified setting. 
-If called with more than one argument, the input will be parsed as a paired list of settings and configuration values to apply.
+If called with more than one argument, the input will be parsed as a paired list of settings and configuration values to apply, and it will return the object.
 \begin{syntax}
 \method{ida}{configure} \\
 \$idaObj configure \$option \\
@@ -113,39 +145,29 @@ If called with more than one argument, the input will be parsed as a paired list
 \$value ... & Configuration values for settings.
 \end{args}
 \FloatBarrier
-
-\subsection{Collapse Criteria}
-The collapse criteria must be defined with the \textit{-collapse} configuration setting. 
+\subsection{Initialization}
+The initial intensity measure used for a blank IDA can be configured with the \textit{-start} configuration setting.
+If not specified, it will default to ``1.0''.
 \begin{syntax}
--collapse "\$name1 \$cc1 \$name2 \$cc2 ... "
+\$idaObj configure -start \$init
 \end{syntax}
 \begin{args}
-\$name1 \$name2 ... & Unique collapse names. \\
-\$cc1 \$cc2 ... & List of collapse criteria (\texttt{\$dm \$op \$value}), as described below: \\
-\quad \$dm & \quad Damage measure name. \\
-\quad \$op & \quad Comparison operator (\texttt{==} \texttt{!=} \texttt{>} \texttt{<} \texttt{>=} \texttt{<=} \texttt{in} \texttt{ni} \texttt{eq} or \texttt{ne}). \\
-\quad \$value & \quad Value to compare to.
+\$init & Starting intensity measure. Default 1.0. \\
 \end{args}
-There are two types of collapse conditions: damage measure based and intensity measure based \cite{vamvatsikos_incremental_2002}. 
-A damage measure based rule states that the first IDA point that exceeds the damage measure limit is the collapse point. 
-An intensity measure based rule, on the other-hand, defines the collapse point as the last point with a slope greater than the limit. 
-For example, FEMA report 350 defines the last point at which the tangent slope is greater than 20\% of the elastic IDA slope as the collapse point \cite{fema_recommended_2000}. 
-Currently, the ``ooida'' package only supports damage-measure based rules.
 \clearpage
 \subsection{Hunt-up Method}
 The algorithm used to determine the next intensity measure prior to collapse is defined with the \textit{-huntup} configuration setting.
-If not specified, it will default to ``Geometric 1.0 2.0''.
+If not specified, it will default to ``Geometric 2.0''.
 \begin{syntax}
--huntup "\$type \$start \$step"
+\$idaObj configure -huntup "\$type \$step"
 \end{syntax}
 \begin{args}
-\$type & Hunt-up method (\textit{Geometric}, \textit{Quadratic}, or \textit{Linear}, default \textit{Geometric}) \\
-\$start & Starting intensity measure. Also starting step for \textit{Quadratic}. Default 1.0. \\
+\$type & Hunt-up method (\textit{Geometric}, \textit{Quadratic}, or \textit{Linear}. Default \textit{Geometric}) \\
 \$step & For \textit{Geometric}, the geometric ratio. For \textit{Quadratic}, the step increase. For \textit{Linear}, the step size. Default 2.0.
 \end{args}
 The \textit{Geometric} method ensures that the ratio between gaps is constant, while the \textit{Quadratic} method ensures that the difference between gaps is constant. To illustrate their differences, the hunt-up of a simple IDA curve $(\text{DM} = \text{IM}^2)$ is performed with both methods with the same number of steps and the same start and end point, as shown in \fig\ref{fig:ida_huntup}.
 
-As can be seen in the figure, the \textit{Geometric} method can increase gap size more quickly, while the \textit{Quadratic} method produces more consistent gap sizes. In fact, if the \textit{Quadratic} ``step'' is set to 0.0, the gap sizes will be constant.
+As can be seen in the figure, the \textit{Geometric} method can increase gap size more quickly, while the \textit{Quadratic} method produces more consistent gap sizes. 
 \begin{figure}[!htb]
 \centering
 \begin{subfigure}[b]{0.45\linewidth}
@@ -164,30 +186,41 @@ As can be seen in the figure, the \textit{Geometric} method can increase gap siz
 \label{fig:ida_huntup}
 \end{figure}
 \clearpage
-\subsection{Hunt and Fill Precision}
-Once collapse is reached in the IDA algorithm, the algorithm will focus first on meeting precision on the capacity point, then on meeting precision on the rest of the IDA curve. 
-For the hunt precision, the gap between the estimated capacity and the minimum collapse intensity is bisected until the gap is less than the tolerance.
-For the fill precision, the gaps below the estimated capacity are bisected or trisected, going in order of largest gaps first, until no gap exists that is greater than the precision.
-When both precision tolerances are met and all jobs are complete, the IDA curve is considered to be complete. 
+\subsection{Tolerances for Bracketing and Fill-In}
+The tolerances for the Bracketing and Fill-In stages of the algorithm are defined with the \textit{-precision} configuration setting. If not specified, it will default to ``0.25 0.5''.
 \begin{syntax}
--precision "\$hunt \$fill"
+\$idaObj configure -precision "\$eps1 \$eps2"
 \end{syntax}
 \begin{args}
-\$hunt & Intensity measure hunt precision. \\
-\$fill & Intensity measure fill precision.
+\$eps1 & Bracketing stage tolerance. Default 0.25 \\
+\$eps2 & Fill-in stage tolerance. Default 0.5
 \end{args}
+Once collapse is reached in the IDA algorithm, the algorithm will focus first on meeting tolerance on the collapse point. 
+This is the Bracketing stage, where the gap between the capacity bounds is bisected until the gap is less than the tolerance.
+When the bracketing tolerance is met, the algorithm enters the Fill-In stage, which focuses on meeting tolerance between points below the collapse point.
+For the Fill-In stage, the gaps below the collapse point are bisected or trisected, going in order of largest gaps first, until no gap exists that is greater than the specified tolerance.
+When both precision tolerances are met, the IDA curve is considered to be complete. 
+\\
+
+\begin{figure}[!htb]
+\centering
+\includegraphics{ida_curve}
+\caption{Representative IDA Curve}
+\label{fig:ida_curve}
+\end{figure}
+
+
 \clearpage
 \subsection{IDA Curve Refining Limits}
-Sometimes, the only information needed from an IDA is whether the capacity is above or below a certain value. 
-In this case, the option \textit{-limits} can be used.
-The -limits option define upper and lower intensity measure limits for collapse refining. 
-By default, they are set to 0 and Inf, respectively. 
+The lower and upper limits for refining the IDA collapse point are defined with the \textit{-limits} configuration setting.
+This can be used to do partial IDAs as described in the FEMA P-695 methodology \cite{fema_quantification_2009}.
+If not specified, it will default to ``0.0 Inf''.
 \begin{syntax}
--limits "\$lower \$upper"
+-limits "\$min \$max"
 \end{syntax}
 \begin{args}
-\$lower & Lower limit for refining collapse point. \\
-\$upper & Upper limit for refining collapse point.
+\$min & Lower limit for refining collapse point. \\
+\$max & Upper limit for refining collapse point.
 \end{args}
 
 The limits define three intensity measure zones as shown in \fig\ref{fig:ida_zones}. 
@@ -200,6 +233,8 @@ In the figure, if collapse has not been reached, the minimum collapse can be con
 \label{fig:ida_zones}
 \end{figure}
 
+
+
 Depending on which zones the the capacity and minimum collapse points are, it will modify the behavior of the IDA as described below:
 
 \begin{tabular}{cp{0.9\linewidth}}
@@ -210,373 +245,55 @@ D & Both estimated capacity and minimum collapse are in zone 2. Full refinement 
 E & Same as D. \\
 F & Both estimated capacity and minimum collapse are in zone 3. Hunting and bracketing are not required, but curve must be filled in below upper limit to capture any structural resurrections.
 \end{tabular}
-%In general, if the capacity is below the lower limit, it will not refine the curve further, and if the capacity is above the maximum, the curve will only be filled in below the upper limit, to capture any potential structural resurrections that could change the relative capacity. 
-%More specifically, there are six potential configurations that are handled by the \textit{-limit} option, described below:
-
-
-
 \clearpage
-\section{Running an IDA}
-The ``ooida'' package does not run the individual dynamic analyses of an IDA.
-Rather, it provides a guiding framework for tracing IDA curves. 
-Individual runs are run either directly in the current instance of OpenSees, or with a job using the job board framework (recommended due to its save-state functionality).
-\subsection{Adding IDA Points}
-IDA data points are inputted via the method \methodlink[0]{ida}{add}. 
-If the input is a single item, it is interpreted as a job name, using the job board framework.
-If the job is posted but not running, it will run the job.
-If the input is a key-value paired list, it is interpreted as damage measure names and values.
-The only reserved keys are ``collapsed'', ``intensity'', and ``jobTag''.
-\begin{syntax}
-\method{ida}{add} \$im <\$jobTag> <\$dmName \$dmValue ...>
-\end{syntax}
-\begin{args}
-\$im & Intensity measure to add. \\
-\$jobTag & Integer job tag, using the job board framework, that corresponds to the intensity measure.  \\
-\$dmName \$dmValue ... & Paired list of damage measure names and values for the intensity measure. Mutually exclusive with \$jobTag.
-\end{args}
+\section{IDA Results}
+The IDA dictionary and the configuration settings are used to analyze and determine the stage of the analysis, the next intensity measure to run, and what the estimated bounds are on collapse capacity.
 
-\subsection{Removing IDA Points}
-The method \methodlink[0]{ida}{remove} removes an intensity measure from an IDA curve.
-If the intensity measure does not exist in the IDA object, it will do nothing.
-\begin{syntax}
-\method{ida}{remove} \$im
-\end{syntax}
-\begin{args}
-\$im & Intensity measure to remove.
-\end{args}
-\clearpage
-\subsection{Wiping the IDA}
-An IDA can be wiped with the method \methodlink[0]{ida}{wipe}.
-This removes all existing points and resets collapse information, but maintains any IDA configuration settings.
-\begin{syntax}
-\method{ida}{wipe}
-\end{syntax}
-
-\subsection{Getting the Next Intensity Measure}
-The next intensity measure to run according to the hunt-up settings, collapse criteria, and precision values, can be queried with \methodlink{ida}{next}. 
-Returns -1 if waiting on active jobs, and -2 if all criteria are met. 
-\begin{syntax}
-\method{ida}{next}
-\end{syntax}
-
-\subsection{Check if IDA is Complete}
-The completion status of an IDA curve can be queried with \methodlink{ida}{complete}. 
-The IDA is considered complete when collapse is reached, hunt and fill precisions are met, and no active jobs remain.
-This is equivalent to checking if the next intensity is -2.
-\begin{syntax}
-\method{ida}{complete}
-\end{syntax}
-
-\subsection{Updating the IDA}
-If using the job board framework for running an IDA, results from jobs will only be added when \methodlink[0]{ida}{update} is called. 
-This method is automatically called during  \methodlink[1]{ida}{run}.
-\begin{syntax}
-\method{ida}{update}
-\end{syntax}
-\clearpage
-\subsection{Run an IDA}
-For convenience, the flow of an IDA can be controlled entirely with \methodlink{ida}{run}.
-\begin{syntax}
-\method{ida}{run} \$imVar \$body
-\end{syntax}
-\begin{args}
-\$imVar & Variable to pass next intensity measure to. \\
-\$body & Body to evaluate that runs each IDA point. Must evaluate to a result dictionary or a job tag, in the same fashion as the Tcl command ``lmap''.
-\end{args}
-
-\begin{example}{Running a single IDA in series}
-\begin{lstlisting}
-$ida run Sa {
-    wipe
-    source DoDynamic.tcl
-}
-\end{lstlisting}
-\end{example}
-\begin{example}{Running a single IDA with ``mpjobs'' framework (series or parallel)}
-\begin{lstlisting}
-jobBoard IDA {
-    $ida run Sa {
-    	makeJob DoDynamic.tcl Sa $Sa
-    }
-}
-\end{lstlisting}
-\end{example}
-
-\clearpage
-\section{Getting IDA State Information}
-Various methods are provided for accessing the state of the IDA.
-\subsection{IDA Stage}
 The stage of the IDA can be queried with the method \methodlink[0]{ida}{stage}.
 \begin{syntax}
 \method{ida}{stage}
 \end{syntax}
-\subsection{Estimated Capacity}
-The estimated capacity, as in the largest intensity measure value below the minimum collapse, can be queried with the method \methodlink[0]{ida}{capacity}.
+
+The next intensity measure can be queried with \methodlink{ida}{next}. 
+If the IDA is complete, it will return blank.
+\begin{syntax}
+\method{ida}{next}
+\end{syntax}
+
+The lower and upper limits on collapse capacity can be queried with the method \methodlink[0]{ida}{capacity}.
+The upper limit is the minimum collapse if collapse is reached.
 \begin{syntax}
 \method{ida}{capacity}
 \end{syntax}
-\subsection{Whether Collapse Was Reached}
-The method \methodlink[0]{ida}{collapsed} returns 1 if collapse was reached, and zero otherwise.
-\begin{syntax}
-\method{ida}{collapsed}
-\end{syntax}
-\subsection{Minimum Collapse}
-The minimum collapse intensity, if collapse was reached, can be queried with the method \methodlink[0]{ida}{minCollapse}.
-If collapse was not reached, it will return blank.
-\begin{syntax}
-\method{ida}{minCollapse} <\$name>
-\end{syntax}
-\begin{args}
-\$name & Collapse name associated with collapse criteria. Default returns minimum for all collapse criteria.
-\end{args}
-\clearpage
-\subsection{List of All Intensities}
-A sorted list of all intensity measure values can be queried with \methodlink{ida}{getIMs}.
-\begin{syntax}
-\method{ida}{getIMs}
-\end{syntax}
-\subsection{Damage Measure Curve}
-A damage measure curve, in matrix form, can be queried with \methodlink{ida}{curve}.
-The first column of the matrix will be the damage measure values, and the second column will be the intensity values, in increasing order.
-\begin{syntax}
-\method{ida}{curve} \$dm
-\end{syntax}
-\begin{args}
-\$dm & Damage measure name.
-\end{args}
-\subsection{Estimated Empirical CDF}
-If the IDA object is a part of a suite object, the method \methodlink[0]{ida}{cdf} will return the estimated CDF for the corresponding ground motion. 
-Otherwise, the method does not exist.
-\begin{syntax}
-\method{ida}{cdf}
-\end{syntax}
 
-\subsection{Getting Table of IDA Data}
-The method \methodlink[0]{ida}{table} returns a ``Tda'' table object containing IDA curve data, where keys correspond to intensity measure values and fields correspond to damage measures. 
-Additionally, the table includes a field called ``jobTag'', a field named ``collapsed'', which is 1 if the intensity is above capacity, and 0 otherwise, and fields for each collapse criteria name.
-
-\begin{syntax}
-\method{ida}{table}
-\end{syntax}
-The IDA curve can be easily exported to CSV with the ``Tda'' command \textit{writeTable}, as shown below.
-\begin{example}{Exporting IDA table to CSV}
+Below is an example of how to use the IDA framework to run an analysis.
+\begin{example}{Example Application}
 \begin{lstlisting}
-writeTable curve.csv [$idaObj table]
-\end{lstlisting}
-\end{example}
-
-\clearpage
-\section{IDA Suite Objects}
-Since IDAs are typically done with a suite of ground motions, an wrapper class is provided: \cmdlink{suite}.
-This wrapper class can be used to easily run multiple IDAs simultaneously.
-Suite objects, like IDA objects, are created from the \cmdlink{suite} class using the standard methods \textit{new} or \textit{create}.
-Once created, \cmdlink{suite} objects act as commands with an ensemble of subcommands, or methods, and can be deleted with the method \methodlink[0]{suite}{destroy}.
-\begin{syntax}
-\command{suite} new <-medianSearch \$medianSearch> \\
-suite create \$objectName <-medianSearch \$medianSearch>
-\end{syntax}
-\begin{args}
-\$objectName & Explicit name for object. \\
-\$medianSearch & Whether to do partial IDA, targeting median CDF. Default false.
-\end{args}
-
-The \textit{-medianSearch} option toggles the partial IDA refinement algorithm, which minimizes the number of analyses required to obtain the median collapse intensity measure required for FEMA P-695 analyses \cite{fema_quantification_2009}. 
-Further explanation of the partial IDA refinement algorithm can be found in \cite{baker_kinematics_2022}.  
-
-\subsection{Removing Suite Objects}
-The standard method \methodlink[0]{suite}{destroy} removes an IDA suite object from the interpreter, and also destroys any linked IDA objects.
-\begin{syntax}
-\method{suite}{destroy}
-\end{syntax}
-\clearpage
-
-\subsection{Adding IDA Objects to Suite}
-The method \methodlink[0]{suite}{add} adds an IDA curve to the suite.
-Adding an IDA to a suite sets up a ``write'' trace on the capacity variable of the IDA object, such that whenever it changes, the estimated fragility curve is updated accordingly.
-Additionally, if the \textit{-medianSearch} option is set, it will then update the \textit{-limits} configuration of each IDA object to reduce the number of extraneous runs.
-It also adds the \methodlink[0]{ida}{cdf} method to the IDA object.
-\begin{syntax}
-\method{suite}{add} \$gm \$idaObj
-\end{syntax}
-\begin{args}
-\$gm & Ground motion name to identify IDA by. \\
-\$idaObj & IDA object.
-\end{args}
-\subsection{Removing IDA Objects from Suite}
-The method \methodlink[0]{suite}{remove} removes an IDA curve from the suite.
-It also removes the associated variable trace and \methodlink[0]{ida}{cdf} method from the IDA object.
-\begin{syntax}
-\method{suite}{remove} \$gm
-\end{syntax}
-\begin{args}
-\$gm & Ground motion name to identify IDA by.
-\end{args}
-
-\subsection{Getting the Next Ground Motion and Intensity}
-Similar to \methodlink{ida}{next}, the next ground motion and intensity measure can be queried with \methodlink{suite}{next}.
-If waiting on active jobs, it will return ``\texttt{\{\} -1}'', and if all ground motions are complete, it will return ``\texttt{\{\} -2}''. 
-Otherwise, it will return a list of the ground motion and an intensity measure to run. 
-If called multiple times, it will cycle through the available IDA curves.
-\begin{syntax}
-\method{suite}{next}
-\end{syntax}
-\clearpage
-\subsection{Checking if all IDA are Complete}
-The method \methodlink[0]{suite}{complete} returns 1 if all IDA curves are complete, and 0 otherwise.
-\begin{syntax}
-\method{suite}{complete}
-\end{syntax}
-
-\subsection{Updating an IDA Suite}
-If using the job board framework for running an IDA suite, results from jobs will only be added when \methodlink{ida}{update} is called for each IDA.
-The suite method \methodlink[0]{suite}{update} simply calls the corresponding IDA method for each IDA object in the suite.
-This method is automatically called during  \methodlink{suite}{run}.
-\begin{syntax}
-\method{suite}{update}
-\end{syntax}
-
-\subsection{Running an IDA Suite}
-For convenience, the flow of running an entire IDA suite can be controlled entirely with \methodlink{suite}{run}.
-\begin{syntax}
-\method{suite}{run} \$gmVar \$imVar \$body
-\end{syntax}
-\begin{args}
-\$gmVar & Variable to pass next ground motion to. \\
-\$imVar & Variable to pass next intensity measure to. \\
-\$body & Body to evaluate that runs each IDA point. Must evaluate to a result dictionary or a job tag, in the same fashion as the Tcl command ``lmap''.
-\end{args}
-
-\begin{example}{Running an IDA suite in series}
-\begin{lstlisting}
-$suite run gmFile Sa {
-    wipe
-    source DoDynamic.tcl
+# Define place-holder collapse equation (with structural resurrection)
+proc Collapsed {x} {
+    expr {$x >= 7.5 || ($x > 3.0 && $x <= 3.5)}
 }
-\end{lstlisting}
-\end{example}
-\begin{example}{Running an IDA suite with ``mpjobs'' framework (series or parallel)}
-\begin{lstlisting}
-$suite run gmFile Sa {
-    makeJob DoDynamic.tcl gmFile $gmFile Sa $Sa
+# Create IDA object
+ida new ida {} {
+    -huntup {Geometric 2.0}
+    -precision {0.25 0.5}
 }
-\end{lstlisting}
-\end{example}
-\clearpage
-\subsection{Accessing Suite IDA Objects}
-The IDA objects in a suite can be queried or called directly with \methodlink{suite}{ida}.
-\begin{syntax}
-\method{suite}{ida} \$gm \$arg1 \$arg2 ...
-\end{syntax}
-\begin{args}
-\$gm & Ground motion associated with IDA object. \\
-\$arg1 \$arg2 ... & Arguments to pass to IDA object. If none, it will return the IDA object.
-\end{args}
-
-\subsection{Getting all Ground Motions in Suite}
-The method \methodlink[0]{suite}{getGMs} returns a list of all ground motions defined for the suite.
-\begin{syntax}
-\method{suite}{getGMs}
-\end{syntax}
-
-\subsection{Getting Summary Table of Fragility Data}
-The method \methodlink[0]{suite}{table} returns a ``Tda'' table, where the ground motions are the keys and sorted in increasing collapse capacity.
-The fields in the fragility data table are as follows:
-
-\begin{tabular}{ll}
-\toprule
-Field & Description \\
-\midrule
-capacity & Collapse intensity (result of \methodlink[1]{ida}{capacity}). \\
-cdf & Cumulative distribution function (CDF) value of fragility curve. \\
-collapsed & Whether the ground motion reached collapse. \\
-... & Collapse criteria names defined with -collapse option of \methodlink[1]{ida}{configure}.\\
-\bottomrule
-\end{tabular}
-
-
-\begin{syntax}
-\method{suite}{table}
-\end{syntax}
-The fragility data can be easily exported to CSV with the ``Tda'' command \textit{writeTable}, as shown below.
-
-\begin{example}{Using ``Tda'' table methods to access fragility data}
-\begin{lstlisting}
-set fragilityData [$suiteObj table]
-set gms [$fragilityData keys]; # list of ground motions, in order of increasing collapse capacity
-set cdf [$fragilityData cget cdf]; # List of cdf values for each ground motion
-writeTable fragility.csv $fragilityData
-\end{lstlisting}
-\end{example}
-
-\clearpage	
-\section{Example Applications}
-The ``ooida'' package is a flexible framework for running incremental dynamic analyses.
-It can be used to process existing data, trace IDA curves in series, or trace IDA curves in parallel using the job board framework.
-\subsection{Process Existing Data}
-Since the IDA framework does not actually run the analyses, existing data can be added directly to an IDA object.
-\begin{example}{Add existing data from CSV file with intensity as first column}
-\begin{lstlisting}
-package require tin
-tin import readTable from tda
-set idaTable [readTable idadata.csv]; # from ida table output
-dict for {im results} [$idaTable data] {
-    $idaObj add $im {*}$results
+# Run IDA
+while {[$ida stage] < 4} {
+    set im [$ida next]
+    $ida set $im [Collapsed $im]
 }
+# Print out capacity, and history of analysis
+puts [$ida capacity]
+puts [dict keys [$ida]]
 \end{lstlisting}
-\end{example}
-\subsection{Tracing an IDA Curve in Series}
-The job board framework is not needed for running an IDA in series, as shown in the example below.
-\begin{example}{IDA of a nonlinear frame (RunDynamic.tcl) in series}
+\tcblower
 \begin{lstlisting}
-package require tin
-tin import writeTable from tda
-# Series example
-set idaObj [ida new -huntup {Geometric 0.1 2.0} -collapse {NSC {drift > 0.10}} \
-        -precision {0.005 0.01}]
-$idaObj run Sa {
-    wipe 
-    source RunDynamic.tcl
-}
-# Save data to file
-writeTable idadata.csv [$idaObj table]
+3.0 3.25
+1.0 2.0 4.0 8.0 6.0 7.0 7.5 7.25 3.0 5.0 0.5 1.5 2.5 3.5 3.25
 \end{lstlisting}
 \end{example}
-\clearpage
-\subsection{Tracing Multiple IDA Curves in Parallel}
-Using the ``ooida'' package and the ``mpjobs'' package, it is easy to run multiple IDA curves in parallel, with load sharing between curves, as shown in the example below. 
 
-\begin{example}{IDA for suite of ground motions in parallel}
-\begin{lstlisting}
-# Main loop (load shares between IDA curves!)
-package require tin
-tin import writeTable from tda
-tin import mpjobs
-tin import ooida
-jobBoard -wipe IDA {
-    # Create suite object
-    set settings ""
-    dict set settings -huntup {Geometric 0.1 2.0}
-    dict set settings -collapse {NSC {drift > 0.10}}
-    dict set settings -precision {0.005 0.01}
-    set suite [suite new]
-    foreach gmFile [glob -directory GMs *.AT2] {
-        $suite add $gmFile [ida new {*}$settings]
-    }
-
-    $suite run gmFile Sa {
-        makeJob RunDynamic.tcl gmFile $gmFile Sa $Sa
-    }
-
-    # Export data
-    writeTable fragility.csv [$suite table]
-    foreach gmFile [$suite getGMs] {
-        set gmName [file rootname [file tail $gmFile]]
-        writeTable $gmName.csv [$suite ida $gmFile table]
-    }
-}
-\end{lstlisting}
-\end{example}
 
 \include{references/references}
-\printindex
 \end{document}
