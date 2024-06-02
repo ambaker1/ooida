@@ -1,7 +1,6 @@
 working/**
 build/**
 doc/**
-tests/IDA
 !doc/*.tex
 !doc/*.pdf
 !doc/template/
