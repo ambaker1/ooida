@@ -1,35 +1,47 @@
 package require tin 1.0
-set version 0.1.1
-set config [dict create VERSION $version]
-dict set config MPJOBS_VERSION 0.1
-dict set config TDA_VERSION 0.1
-tin bake src/install.tin build/install.tcl $config
-tin bake src/pkgIndex.tin build/pkgIndex.tcl $config
-tin bake src/ooida.tin build/ooida.tcl $config
 tin import assert from tin
+tin import tcltest
+set version 0.2
+set config [dict create VERSION $version VUTIL_VERSION 4.0]
 
-# Run tests
-cd tests
-# Series OpenSees
-puts "Running tests in OpenSees"
-catch {exec OpenSees test.tcl} result options
-puts $result
-assert [lindex [dict get $options -errorcode] end] == 1
-# OpenSeesMPI, n = 1 (series)
-puts "Running tests in OpenSeesMPI, n = 1"
-catch {exec OpenSeesMPI -n 1 test.tcl 2>NUL} result options
-puts $result
-assert [lindex [dict get $options -errorcode] end] == 1
-# OpenSeesMPI, n = 5 (parallel)
-puts "Running tests in OpenSeesMPI, n = 5"
-catch {exec OpenSeesMPI -n 5 test.tcl 2>NUL} result options
-puts $result
-assert [lindex [dict get $options -errorcode] end] == 1
-cd ..
-
-# Overwrite files
-file copy -force {*}[glob build/*.tcl] [pwd]
+puts "Building from source files..."
+tin bake src build $config
 tin bake doc/template/version.tin doc/template/version.tex $config
-# Run installer
+tin import assert from tin
+source tests/build_examples.tcl
+
+puts "Loading package from build folder..."
+source build/ooida.tcl 
+namespace import ooida::*
+
+puts "Running tests"
+source tests/ooida_tests.tcl
+source tests/doc_examples.tcl
+
+# Check number of failed tests
+set nFailed $::tcltest::numTests(Failed)
+
+# Clean up and report on tests
+cleanupTests
+
+# If tests failed, return error
+if {$nFailed > 0} {
+    error "$nFailed tests failed"
+}
+
+puts "Tests passed, installing..."
+# Tests passed, copy build files to main folder and install
+file copy -force {*}[glob -directory build *] [pwd]
 exec tclsh install.tcl
-assert [tin installed ooida -exact $version] eq $version
+
+# Verify installation
+puts "Verifying installation..."
+tin forget ooida
+tin clear
+tin import ooida -exact $version
+
+# Build documentation
+puts "Building documentation..."
+cd doc
+exec -ignorestderr pdflatex ooida.tex
+cd ..
